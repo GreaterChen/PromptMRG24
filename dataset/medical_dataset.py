@@ -56,7 +56,7 @@ class generation_train(Dataset):
             self.clip_features = np.array(json.load(f))
         
     def __len__(self): 
-        return len(self.ann)
+        return len(self.ann[:32])
     
     def __getitem__(self, index):    
         

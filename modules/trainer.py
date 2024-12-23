@@ -154,31 +154,15 @@ class Trainer(BaseTrainer):
                 clip_memory = clip_memory.to(self.device)
                 ground_truths = captions
                 # reports, cls_preds, cls_preds_logits = self.model.module.generate(images, clip_memory, sample=False, num_beams=self.args.beam_size, max_length=self.args.gen_max_len, min_length=self.args.gen_min_len)
-                reports, cls_preds, cls_preds_logits = self.model.generate(images, clip_memory, sample=False, num_beams=self.args.beam_size, max_length=self.args.gen_max_len, min_length=self.args.gen_min_len)
-                ## logit adjustment
-                cls_labels = (cls_labels==1).float()
-                logit = cls_preds_logits*cls_labels
-                logits.append(logit.cpu().numpy())
-                counts.append(cls_labels.cpu().numpy())
+                reports, _, _ = self.model.generate(images, clip_memory, sample=False, num_beams=self.args.beam_size, max_length=self.args.gen_max_len, min_length=self.args.gen_min_len)
+                
 
                 val_res.extend(reports)
                 val_gts.extend(ground_truths)
 
-            #######
-            logits = np.concatenate(logits, axis=0)
-            counts = np.concatenate(counts, axis=0)
-            logits = np.sum(logits, 0)
-            counts = np.sum(counts, 0)
-            logits = logits / counts
-            logits /= np.max(logits)
-            logits = np.append(logits, [1,1,1,1]) # 4 auxiliary diseases
-            #######
-            self.base_probs = logits # update class distribution
             val_met = self.metric_ftns({i: [gt] for i, gt in enumerate(val_gts)},
                                        {i: [re] for i, re in enumerate(val_res)})
-            val_ce = self.chexbert_metrics.compute(val_gts, val_res)
             log.update(**{'val_' + k: v for k, v in val_met.items()})
-            log.update(**{'val_' + k: v for k, v in val_ce.items()})
 
         with torch.no_grad():
             test_gts, test_res = [], []
@@ -194,9 +178,7 @@ class Trainer(BaseTrainer):
                 test_gts.extend(ground_truths)
             test_met = self.metric_ftns({i: [gt] for i, gt in enumerate(test_gts)},
                                         {i: [re] for i, re in enumerate(test_res)})
-            test_ce = self.chexbert_metrics.compute(test_gts, test_res)
             log.update(**{'test_' + k: v for k, v in test_met.items()})
-            log.update(**{'test_' + k: v for k, v in test_ce.items()})
         return log
 
     

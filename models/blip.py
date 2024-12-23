@@ -78,22 +78,9 @@ class BLIP_Decoder(nn.Module):
         image_embeds, avg_embeds = self.visual_encoder(image)   # (bs, 7*7, 2048), (bs, 2048)
         image_atts = torch.ones(image_embeds.size()[:-1],dtype=torch.long).to(image.device)
 
-        ##########################
-        # NxKxC -> KxNxC
-        clip_memory = torch.permute(clip_memory, (1, 0, 2))     # (k, bs, 512)
-        query_embed = self.vision_proj(avg_embeds)  # (bs, 512)
-        hs = self.memory(clip_memory, None, query_embed.unsqueeze(0), None)
-        # Nx512
-        hs = hs.squeeze(0).squeeze(1)   # (bs, 512)
-        avg_embeds = torch.cat((avg_embeds, hs), 1) # (bs, 2048+512)
-        ##########################
+        loss_cls = torch.tensor(0., dtype=torch.float32)
+        caption = [item[108:] for item in caption]
 
-        cls_preds = self.cls_head(avg_embeds)
-        cls_preds = cls_preds.view(-1, 4, 18)
-        # logit adjustment
-        cls_preds[:, 1, :] += torch.log(torch.from_numpy(base_probs)).view(1, -1).to(image.device)
-        loss_cls = criterion_cls(cls_preds, cls_labels)
-        
         text = self.tokenizer(caption, padding='longest', truncation=True, return_tensors="pt").to(image.device)
         
         text.input_ids[:,0] = self.tokenizer.bos_token_id
@@ -112,58 +99,38 @@ class BLIP_Decoder(nn.Module):
         loss_lm = decoder_output.loss                
         return loss_lm, loss_cls
         
-    def generate(self, image, clip_memory, sample=False, num_beams=3, max_length=100, min_length=10, top_p=0.9, repetition_penalty=1.0):
-        image_embeds, avg_embeds = self.visual_encoder(image) 
+def generate(self, image, clip_memory, sample=False, num_beams=3, max_length=100, min_length=10, top_p=0.9, repetition_penalty=1.0):
+    # Get image embeddings from visual encoder
+    image_embeds, _ = self.visual_encoder(image) 
+    
+    if not sample:
+        image_embeds = image_embeds.repeat_interleave(num_beams, dim=0)
         
-        # NxKxC -> KxNxC
-        clip_memory = torch.permute(clip_memory, (1, 0, 2))
-        query_embed = self.vision_proj(avg_embeds)
-        hs = self.memory(clip_memory, None, query_embed.unsqueeze(0), None)
-        # Nx512
-        hs = hs.squeeze(0).squeeze(1)
-        avg_embeds = torch.cat((avg_embeds, hs), 1)
-
-        # classification branch
-        cls_preds = self.cls_head(avg_embeds)
-        cls_preds = cls_preds.view(-1, 4, 18)
-        cls_preds = F.softmax(cls_preds, dim=1)
-        cls_preds_logits = cls_preds[:, 1, :14]
-        cls_preds = torch.argmax(cls_preds, dim=1).cpu().numpy().tolist()
-
-        prompts = []
-        for j in range(len(cls_preds)):
-            prompt = ' '.join([SCORES[c] for c in cls_preds[j]])+' '
-            prompts.append(prompt)
-
-        if not sample:
-            image_embeds = image_embeds.repeat_interleave(num_beams,dim=0)
-            
-        image_atts = torch.ones(image_embeds.size()[:-1],dtype=torch.long).to(image.device)
-        model_kwargs = {"encoder_hidden_states": image_embeds, "encoder_attention_mask":image_atts}
+    # Create attention mask for image embeddings
+    image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(image.device)
+    model_kwargs = {"encoder_hidden_states": image_embeds, "encoder_attention_mask": image_atts}
+    
+    # Initialize decoder input with BOS token
+    input_ids = torch.ones((image_embeds.size(0), 1), dtype=torch.long).to(image.device)
+    input_ids[:, 0] = self.tokenizer.bos_token_id
+    
+    # Generate text using beam search
+    outputs = self.text_decoder.generate(input_ids=input_ids,
+                                       min_length=min_length,
+                                       max_new_tokens=max_length, 
+                                       num_beams=num_beams,
+                                       eos_token_id=self.tokenizer.sep_token_id,
+                                       pad_token_id=self.tokenizer.pad_token_id,
+                                       repetition_penalty=repetition_penalty,
+                                       **model_kwargs)
+    
+    # Decode generated tokens to text
+    captions = []
+    for output in outputs:
+        caption = self.tokenizer.decode(output, skip_special_tokens=True)
+        captions.append(caption)
         
-        text = self.tokenizer(prompts, return_tensors="pt")
-        input_ids = text.input_ids.to(image.device)
-        attn_masks = text.attention_mask.to(image.device)
-        input_ids[:,0] = self.tokenizer.bos_token_id
-        input_ids = input_ids[:, :-1] 
-        attn_masks = attn_masks[:, :-1] 
-        
-        #beam search
-        outputs = self.text_decoder.generate(input_ids=input_ids,
-                                             min_length=min_length, # 4.25 Transformers
-                                             max_new_tokens=max_length,
-                                             num_beams=num_beams,
-                                             eos_token_id=self.tokenizer.sep_token_id,
-                                             pad_token_id=self.tokenizer.pad_token_id, 
-                                             repetition_penalty=repetition_penalty,
-                                             attention_mask = attn_masks,
-                                             **model_kwargs)            
-            
-        captions = []    
-        for i, output in enumerate(outputs):
-            caption = self.tokenizer.decode(output, skip_special_tokens=True)    
-            captions.append(caption[len(prompts[i]):])
-        return captions, cls_preds, cls_preds_logits
+    return captions
 
 def blip_decoder(args, tokenizer, **kwargs):
     model = BLIP_Decoder(args, tokenizer, **kwargs)
